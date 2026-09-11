@@ -9,7 +9,8 @@ import {
   BridgeCommandType
 } from '../types';
 
-const API_BASE = '/api';
+const API_BASE = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
+export const WS_BASE = import.meta.env.VITE_WS_URL || ((typeof window !== 'undefined' && window.location.protocol === 'https:') ? 'wss://' : 'ws://') + (typeof window !== 'undefined' ? window.location.host : 'localhost:8000') + '/ws';
 export const API_KEY = 'rg_874fe1703f654373bd3fdef5840ad1ee';
 
 const defaultHeaders = {

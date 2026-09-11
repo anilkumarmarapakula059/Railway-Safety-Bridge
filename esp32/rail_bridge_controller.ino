@@ -18,13 +18,18 @@
  */
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
 // --- Configuration ---
-const char* WIFI_SSID = "RAILSAFE_SECURE_WLAN";
-const char* WIFI_PASSWORD = "IndustrialSafetySecret2026";
-const char* BACKEND_SERVER = "http://192.168.1.100:8000";
+// Replace with your local WiFi credentials
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+// Cloud Render Backend URL (replace with your deployed Render URL)
+// Example: "https://railsafe-backend.onrender.com" or local "http://192.168.1.100:8000"
+const char* BACKEND_SERVER = "https://railsafe-backend.onrender.com";
 const char* DEVICE_ID = "ESP32_OGL_BRIDGE_01";
 const char* AUTH_TOKEN = "rg_874fe1703f654373bd3fdef5840ad1ee";
 
@@ -120,7 +125,15 @@ void sendTelemetry() {
 
     HTTPClient http;
     String url = String(BACKEND_SERVER) + "/api/bridge/esp32/heartbeat";
-    http.begin(url);
+
+    if (String(BACKEND_SERVER).startsWith("https")) {
+        WiFiClientSecure secureClient;
+        secureClient.setInsecure(); // Skip certificate validation for cloud prototype
+        http.begin(secureClient, url);
+    } else {
+        http.begin(url);
+    }
+
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-API-Key", AUTH_TOKEN);
 
@@ -137,7 +150,9 @@ void sendTelemetry() {
 
     int httpResponseCode = http.POST(requestBody);
     if (httpResponseCode > 0) {
-        // Heartbeat ACK received
+        Serial.printf("[ESP32 Telemetry] Heartbeat sent to Render. Response: %d\n", httpResponseCode);
+    } else {
+        Serial.printf("[ESP32 Telemetry] Connection error: %s\n", http.errorToString(httpResponseCode).c_str());
     }
     http.end();
 }
