@@ -1,0 +1,1420 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>RAILSAFE – Automatic Footbridge Control System | Ongole Railway Station</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10'/></svg>" />
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            rail: {
+              dark: '#020617',
+              card: '#0f172a',
+              border: '#1e293b',
+              accent: '#3b82f6',
+              danger: '#ef4444',
+              warning: '#f59e0b',
+              success: '#10b981'
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- React 18 & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    body {
+      background-color: #020617;
+      color: #f8fafc;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 0;
+      overflow-x: hidden;
+    }
+    .leaflet-container {
+      background: #090d16 !important;
+      font-family: inherit;
+    }
+    .leaflet-tile {
+      filter: brightness(0.6) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7);
+    }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+    const API_KEY = "rg_874fe1703f654373bd3fdef5840ad1ee";
+
+    // --- Sound Synthesizer (Web Audio API) ---
+    class RailwaySoundEngine {
+      constructor() {
+        this.ctx = null;
+        this.isMuted = false;
+      }
+      initCtx() {
+        if (!this.ctx) {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (AudioCtx) this.ctx = new AudioCtx();
+        }
+        if (this.ctx && this.ctx.state === 'suspended') {
+          this.ctx.resume();
+        }
+      }
+      playSiren() {
+        if (this.isMuted) return;
+        try {
+          this.initCtx();
+          if (!this.ctx) return;
+          const now = this.ctx.currentTime;
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(440, now);
+          osc.frequency.linearRampToValueAtTime(750, now + 0.35);
+          osc.frequency.linearRampToValueAtTime(440, now + 0.7);
+          gain.gain.setValueAtTime(0.12, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.75);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start(now);
+          osc.stop(now + 0.75);
+        } catch (e) {}
+      }
+      playEmergencyBuzzer() {
+        if (this.isMuted) return;
+        try {
+          this.initCtx();
+          if (!this.ctx) return;
+          const now = this.ctx.currentTime;
+          for (let i = 0; i < 3; i++) {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(950, now + i * 0.15);
+            gain.gain.setValueAtTime(0.18, now + i * 0.15);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + i * 0.15 + 0.1);
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.start(now + i * 0.15);
+            osc.stop(now + i * 0.15 + 0.1);
+          }
+        } catch (e) {}
+      }
+    }
+    const soundEngine = new RailwaySoundEngine();
+
+    // --- Mock Data ---
+    const INITIAL_TRAINS = [
+      {
+        train_number: '12711',
+        train_name: 'Pinakini Express',
+        train_type: 'Express',
+        origin: 'Chennai Central (MAS)',
+        dest: 'Vijayawada Jn (BZA)',
+        lat: 15.466,
+        lng: 80.046,
+        current_station: 'Singarayakonda (SKM)',
+        next_station: 'Ongole (OGL)',
+        eta: '18:18 IST',
+        speed: 88,
+        dist: 4.2,
+        direction: 'DOWN',
+        platform: 'Platform 1',
+        zone: 'WARNING',
+        is_approaching: true
+      },
+      {
+        train_number: '07576',
+        train_name: 'GNT - TPTY Express Special',
+        train_type: 'Passenger / Local',
+        origin: 'Guntur Jn (GNT)',
+        dest: 'Tirupati (TPTY)',
+        lat: 15.518,
+        lng: 80.054,
+        current_station: 'Ammanabrolu (ANB)',
+        next_station: 'Ongole (OGL)',
+        eta: '17:35 IST',
+        speed: 42,
+        dist: 1.8,
+        direction: 'UP',
+        platform: 'Platform 2',
+        zone: 'WARNING',
+        is_approaching: true
+      },
+      {
+        train_number: '20677',
+        train_name: 'Chennai - Vijayawada Vande Bharat',
+        train_type: 'Vande Bharat Express',
+        origin: 'Chennai Central (MAS)',
+        dest: 'Vijayawada Jn (BZA)',
+        lat: 15.34,
+        lng: 80.01,
+        current_station: 'Kavali (KVZ)',
+        next_station: 'Ongole (OGL)',
+        eta: '18:45 IST',
+        speed: 120,
+        dist: 18.5,
+        direction: 'DOWN',
+        platform: 'Platform 1',
+        zone: 'SAFE',
+        is_approaching: true
+      },
+      {
+        train_number: '12604',
+        train_name: 'Chennai Express',
+        train_type: 'Superfast Express',
+        origin: 'Hyderabad (HYB)',
+        dest: 'Chennai Central (MAS)',
+        lat: 15.78,
+        lng: 80.29,
+        current_station: 'Bapatla (BPP)',
+        next_station: 'Chirala (CLX)',
+        eta: '19:15 IST',
+        speed: 105,
+        dist: 34.0,
+        direction: 'UP',
+        platform: 'Platform 2',
+        zone: 'SAFE',
+        is_approaching: false
+      }
+    ];
+
+    const INITIAL_LOGS = [
+      { id: 'EVT-9021', time: '18:12:15', type: 'CLOSURE_COMMAND_SENT', sev: 'CRITICAL', train: '12711 Pinakini', dist: '4.2 km', state: 'CLOSING', res: 'ACK_SUCCESS', details: 'Auto-closure dispatched to ESP32: Pinakini Express within 5.0 km threshold.' },
+      { id: 'EVT-9020', time: '18:12:12', type: 'ZONE_ENTERED_5KM', sev: 'WARNING', train: '12711 Pinakini', dist: '4.9 km', state: 'SAFE_OPEN', res: 'TRIGGERED', details: 'Train breached 5.0 km proximity boundary. High-priority audio siren active.' },
+      { id: 'EVT-9019', time: '18:10:45', type: 'TRAIN_DETECTED', sev: 'INFO', train: '12711 Pinakini', dist: '8.5 km', state: 'SAFE_OPEN', res: 'TRACKING', details: 'Train acquired on Down line approach vector from Singarayakonda.' },
+      { id: 'EVT-9018', time: '18:05:00', type: 'BRIDGE_OPENED', sev: 'INFO', train: '—', dist: '0 km', state: 'SAFE_OPEN', res: 'SUCCESS', details: 'Footbridge extended across Platform 1 and 2. Passenger green crossing signals active.' }
+    ];
+
+    // --- Main Root Component ---
+    function App() {
+      const [role, setRole] = useState('PASSENGER'); // PASSENGER, OPERATOR, ADMINISTRATOR
+      const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, search, details, control, logs, health, simulation
+      const [currentTime, setCurrentTime] = useState(new Date().toLocaleTimeString());
+      const [isMuted, setIsMuted] = useState(false);
+      const [isDisclaimerOpen, setIsDisclaimerOpen] = useState(false);
+      const [freshness, setFreshness] = useState('LIVE');
+
+      // Bridge state
+      const [bridgeState, setBridgeState] = useState('CLOSING'); // SAFE_OPEN, CLOSING, CLOSED, TRAIN_PASSING, OPENING, EMERGENCY_STOP, FAULT
+      const [positionPct, setPositionPct] = useState(35);
+      const [motorStatus, setMotorStatus] = useState('RETRACTING');
+      const [crossingActive, setCrossingActive] = useState(false);
+      const [esp32Status, setEsp32Status] = useState('ONLINE');
+
+      // Trains & Distance Simulation
+      const [trainDistance, setTrainDistance] = useState(4.2);
+      const [isSimPlaying, setIsSimPlaying] = useState(false);
+      const [selectedTrain, setSelectedTrain] = useState(INITIAL_TRAINS[0]);
+      const [searchQuery, setSearchQuery] = useState('');
+      const [logs, setLogs] = useState(INITIAL_LOGS);
+
+      // Confirmation Modal State
+      const [confirmModal, setConfirmModal] = useState({ isOpen: false, cmd: null, text: '' });
+
+      // Clock
+      useEffect(() => {
+        const timer = setInterval(() => setCurrentTime(new Date().toLocaleTimeString()), 1000);
+        return () => clearInterval(timer);
+      }, []);
+
+      // Smooth position motion loop
+      useEffect(() => {
+        const interval = setInterval(() => {
+          if (bridgeState === 'CLOSING' && positionPct > 0) {
+            setPositionPct(prev => {
+              const next = Math.max(0, prev - 15);
+              if (next === 0) {
+                setBridgeState('CLOSED');
+                setMotorStatus('IDLE');
+              }
+              return next;
+            });
+          } else if (bridgeState === 'OPENING' && positionPct < 100) {
+            setPositionPct(prev => {
+              const next = Math.min(100, prev + 15);
+              if (next === 100) {
+                setBridgeState('SAFE_OPEN');
+                setMotorStatus('IDLE');
+                setCrossingActive(true);
+              }
+              return next;
+            });
+          }
+        }, 400);
+        return () => clearInterval(interval);
+      }, [bridgeState, positionPct]);
+
+      // Evaluation of proximity rules
+      const evaluateDistance = useCallback((dist) => {
+        const threshold = 5.0; // Express threshold
+        if (dist <= threshold && dist > 0) {
+          if (bridgeState === 'SAFE_OPEN' || bridgeState === 'OPENING') {
+            soundEngine.playSiren();
+            setBridgeState('CLOSING');
+            setMotorStatus('RETRACTING');
+            setCrossingActive(false);
+            setLogs(prev => [
+              {
+                id: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+                time: new Date().toLocaleTimeString(),
+                type: 'WARNING_GENERATED',
+                sev: 'CRITICAL',
+                train: '12711 Pinakini',
+                dist: `${dist.toFixed(1)} km`,
+                state: 'CLOSING',
+                res: 'ACK_SUCCESS',
+                details: `Proximity breach: 12711 Pinakini Express detected at ${dist.toFixed(1)} km. Automatic bridge closure initiated.`
+              },
+              ...prev
+            ]);
+          }
+        } else if (dist <= 0 && dist > -0.8) {
+          setBridgeState('TRAIN_PASSING');
+          setPositionPct(0);
+          setCrossingActive(false);
+        } else if (dist <= -0.8) {
+          if (bridgeState === 'TRAIN_PASSING' || bridgeState === 'CLOSED') {
+            setBridgeState('OPENING');
+            setMotorStatus('EXTENDING');
+            setLogs(prev => [
+              {
+                id: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+                time: new Date().toLocaleTimeString(),
+                type: 'REOPENING_AUTHORIZED',
+                sev: 'INFO',
+                train: '12711 Pinakini',
+                dist: `${dist.toFixed(1)} km`,
+                state: 'OPENING',
+                res: 'AUTHORIZED',
+                details: 'Train has cleared the station safe boundary (>0.8km past OGL). Safety engine authorized reopening.'
+              },
+              ...prev
+            ]);
+          }
+        }
+      }, [bridgeState]);
+
+      // Simulation continuous play
+      useEffect(() => {
+        if (!isSimPlaying) return;
+        const t = setInterval(() => {
+          setTrainDistance(prev => {
+            const next = Math.round((prev - 0.2) * 10) / 10;
+            if (next < -1.5) {
+              evaluateDistance(10.0);
+              return 10.0;
+            }
+            evaluateDistance(next);
+            return next;
+          });
+        }, 700);
+        return () => clearInterval(t);
+      }, [isSimPlaying, evaluateDistance]);
+
+      // Handle Map Initialization
+      const mapContainerRef = useRef(null);
+      const mapInstance = useRef(null);
+      const trainMarker = useRef(null);
+
+      useEffect(() => {
+        if (activeTab !== 'dashboard') return;
+        if (!window.L || !mapContainerRef.current) return;
+
+        if (!mapInstance.current) {
+          const map = window.L.map(mapContainerRef.current).setView([15.5034, 80.0505], 12);
+          window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors | SCR'
+          }).addTo(map);
+
+          // Bridge Station Marker
+          window.L.marker([15.5034, 80.0505]).addTo(map).bindPopup('<b>Ongole Station (OGL)</b><br>Retractable Footbridge (Platform 1 to 2)');
+
+          // 2km Local Zone (Amber)
+          window.L.circle([15.5034, 80.0505], {
+            color: '#f59e0b',
+            fillColor: '#f59e0b',
+            fillOpacity: 0.12,
+            weight: 2,
+            dashArray: '6, 6',
+            radius: 2000
+          }).addTo(map);
+
+          // 5km Express Zone (Red)
+          window.L.circle([15.5034, 80.0505], {
+            color: '#ef4444',
+            fillColor: '#ef4444',
+            fillOpacity: 0.08,
+            weight: 2,
+            dashArray: '8, 8',
+            radius: 5000
+          }).addTo(map);
+
+          // Train Marker
+          trainMarker.current = window.L.marker([15.466, 80.046]).addTo(map).bindPopup('<b>12711 Pinakini Express</b><br>Distance: 4.2 km');
+          mapInstance.current = map;
+        }
+
+        // Update train marker pos
+        if (trainMarker.current) {
+          const newLat = 15.5034 - (trainDistance / 111.0);
+          const newLng = 80.0505 - (trainDistance / 111.0) * 0.15;
+          trainMarker.current.setLatLng([newLat, newLng]);
+          trainMarker.current.setPopupContent(`<b>12711 Pinakini Express</b><br>Distance: <b>${trainDistance.toFixed(1)} km</b><br>Speed: 88 km/h`);
+        }
+      }, [activeTab, trainDistance]);
+
+      // Execute Staff Command
+      const executeManualCmd = (cmd) => {
+        setConfirmModal({ isOpen: false, cmd: null, text: '' });
+        if (cmd === 'EMERGENCY_STOP') {
+          soundEngine.playEmergencyBuzzer();
+          setBridgeState('EMERGENCY_STOP');
+          setMotorStatus('BRAKED');
+          setCrossingActive(false);
+          setLogs(prev => [
+            { id: `EVT-${Math.floor(1000 + Math.random() * 9000)}`, time: new Date().toLocaleTimeString(), type: 'EMERGENCY_STOP', sev: 'CRITICAL', train: '—', dist: `${trainDistance.toFixed(1)} km`, state: 'EMERGENCY_STOP', res: 'SUCCESS', details: 'EMERGENCY STOP manually triggered by Railway Operator. Solenoid brake engaged.' },
+            ...prev
+          ]);
+          return;
+        }
+
+        if (cmd === 'CLOSE') {
+          soundEngine.playSiren();
+          setBridgeState('CLOSING');
+          setMotorStatus('RETRACTING');
+          setCrossingActive(false);
+          setLogs(prev => [
+            { id: `EVT-${Math.floor(1000 + Math.random() * 9000)}`, time: new Date().toLocaleTimeString(), type: 'CLOSING_STARTED', sev: 'WARNING', train: '—', dist: `${trainDistance.toFixed(1)} km`, state: 'CLOSING', res: 'SUCCESS', details: 'Manual retraction ordered by Operator.' },
+            ...prev
+          ]);
+        } else if (cmd === 'OPEN') {
+          if (trainDistance <= 5.0 && trainDistance >= -0.5) {
+            alert(`SAFETY INTERLOCK BLOCKED: Train 12711 is at ${trainDistance.toFixed(1)} km! Extension forbidden while train is within 5.0 km danger threshold.`);
+            return;
+          }
+          setBridgeState('OPENING');
+          setMotorStatus('EXTENDING');
+          setLogs(prev => [
+            { id: `EVT-${Math.floor(1000 + Math.random() * 9000)}`, time: new Date().toLocaleTimeString(), type: 'OPENING_STARTED', sev: 'INFO', train: '—', dist: `${trainDistance.toFixed(1)} km`, state: 'OPENING', res: 'SUCCESS', details: 'Manual extension ordered by Operator.' },
+            ...prev
+          ]);
+        } else if (cmd === 'STOP') {
+          setMotorStatus('IDLE');
+        } else if (cmd === 'RESET_FAULT') {
+          setBridgeState(positionPct >= 95 ? 'SAFE_OPEN' : 'CLOSED');
+          setMotorStatus('IDLE');
+        }
+      };
+
+      const isDanger = trainDistance <= 5.0 && trainDistance > 0;
+
+      return (
+        <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans pb-16 md:pb-6">
+          {/* HEADER */}
+          <header className="bg-slate-900 border-b border-slate-800 text-slate-100 sticky top-0 z-40 shadow-xl">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/20 font-black text-xl">
+                  🚆
+                </div>
+                <div>
+                  <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+                    RAILSAFE <span className="text-xs font-medium px-2 py-0.5 rounded bg-blue-900/60 text-blue-300 border border-blue-700">IoT-AUTOBRIDGE</span>
+                  </h1>
+                  <p className="text-xs text-slate-400 font-medium">
+                    Automatic Footbridge Control System • <span className="text-amber-400 font-semibold">Ongole Railway Station (OGL)</span>
+                  </p>
+                </div>
+              </div>
+
+              {/* Status Indicators */}
+              <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 text-xs">
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">
+                  ⏱️ {currentTime}
+                </div>
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-300 border border-emerald-800">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  Live Telemetry
+                </div>
+                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${
+                  esp32Status === 'ONLINE' ? 'bg-blue-950 text-blue-300 border-blue-800' : 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse'
+                }`}>
+                  📡 ESP32: {esp32Status}
+                </div>
+              </div>
+
+              {/* Actions & Role Switcher */}
+              <div className="flex items-center gap-2.5">
+                <button
+                  onClick={() => {
+                    const m = !isMuted;
+                    setIsMuted(m);
+                    soundEngine.isMuted = m;
+                  }}
+                  className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:text-white"
+                  title="Toggle siren sound"
+                >
+                  {isMuted ? '🔇' : '🔊'}
+                </button>
+
+                <div className="flex items-center bg-slate-800 p-1 rounded-lg border border-slate-700 text-xs">
+                  <span className="text-slate-400 mx-1">Role:</span>
+                  <select
+                    value={role}
+                    onChange={(e) => setRole(e.target.value)}
+                    className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
+                  >
+                    <option value="PASSENGER" className="bg-slate-900">Passenger (Read Only)</option>
+                    <option value="OPERATOR" className="bg-slate-900">Railway Operator</option>
+                    <option value="ADMINISTRATOR" className="bg-slate-900">Administrator</option>
+                  </select>
+                </div>
+
+                <button
+                  onClick={() => setIsDisclaimerOpen(true)}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+                >
+                  ⚠️ Prototype Notice
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {/* NAVIGATION */}
+          <nav className="bg-slate-900/90 backdrop-blur border-b border-slate-800">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+              <div className="flex space-x-1 sm:space-x-3 overflow-x-auto py-2">
+                {[
+                  { id: 'dashboard', label: 'Dashboard', icon: '📊' },
+                  { id: 'search', label: 'Train Search', icon: '🔍' },
+                  { id: 'details', label: 'Live Tracking', icon: '🚆' },
+                  { id: 'control', label: 'Bridge Control', icon: '🎛️', badge: role === 'PASSENGER' ? 'Staff Only' : null },
+                  { id: 'logs', label: 'Event Logs', icon: '📜' },
+                  { id: 'health', label: 'System Health', icon: '🩺' },
+                  { id: 'simulation', label: 'Simulation Studio', icon: '🕹️', badge: 'Dev' }
+                ].map(tab => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
+                      activeTab === tab.id
+                        ? 'bg-blue-600 text-white shadow-md shadow-blue-500/25'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                    }`}
+                  >
+                    <span>{tab.icon}</span>
+                    <span>{tab.label}</span>
+                    {tab.badge && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase bg-slate-800 text-slate-300 border border-slate-700">
+                        {tab.badge}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </nav>
+
+          {/* MAIN VIEW CONTAINER */}
+          <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+
+            {/* TAB: DASHBOARD */}
+            {activeTab === 'dashboard' && (
+              <>
+                {/* Safety Alert Banner */}
+                {isDanger ? (
+                  <div className="rounded-xl border-2 border-red-500 bg-gradient-to-r from-red-950 via-amber-950 to-slate-900 p-5 shadow-2xl animate-pulse">
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                      <div className="flex items-center gap-3.5">
+                        <div className="p-3 rounded-xl bg-red-600 text-white text-2xl font-bold">
+                          🚨
+                        </div>
+                        <div>
+                          <span className="px-2 py-0.5 rounded text-[11px] font-black uppercase bg-red-600 text-white">
+                            HIGH PRIORITY SAFETY INTERLOCK
+                          </span>
+                          <h2 className="text-xl font-extrabold text-white mt-1">
+                            ⚠️ TRAIN APPROACHING SAFETY THRESHOLD
+                          </h2>
+                          <p className="text-xs sm:text-sm text-red-200">
+                            12711 Pinakini Express detected at {trainDistance.toFixed(1)} km. Bridge closure initiated automatically!
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 bg-slate-900/80 p-2.5 rounded-lg border border-red-900 text-center text-xs">
+                        <div>
+                          <span className="text-[10px] uppercase text-slate-400 block font-bold">Train</span>
+                          <span className="font-bold text-amber-300">12711 Pinakini</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase text-slate-400 block font-bold">Distance</span>
+                          <span className="font-mono font-extrabold text-red-400">{trainDistance.toFixed(1)} km</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase text-slate-400 block font-bold">Threshold</span>
+                          <span className="font-mono font-bold text-slate-200">5.0 km</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase text-slate-400 block font-bold">Action</span>
+                          <span className="font-black text-rose-300 uppercase">CLOSURE INITIATED</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-emerald-800 bg-emerald-950/40 p-4 flex items-center justify-between text-emerald-200">
+                    <div className="flex items-center gap-3">
+                      <span className="text-2xl">🛡️</span>
+                      <div>
+                        <h3 className="text-sm font-bold text-emerald-300">Corridor Clear — Footbridge Safe for Passenger Crossing</h3>
+                        <p className="text-xs text-emerald-400/80">No train within danger proximity (Express: 5.0 km, Local: 2.0 km). Retractable bridge deployed.</p>
+                      </div>
+                    </div>
+                    <span className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-900/80 border border-emerald-700">
+                      NORMAL SAFE STATE
+                    </span>
+                  </div>
+                )}
+
+                {/* 2-Column Bridge Status & Digital Twin */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Bridge Status Card */}
+                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                        <div>
+                          <h3 className="text-base font-bold text-slate-100">Retractable Footbridge Telemetry</h3>
+                          <p className="text-xs text-slate-400">Platform 1 (Main) ➔ Platform 2/3 Island</p>
+                        </div>
+                        <span className={`px-3 py-1 rounded-lg text-xs font-black uppercase tracking-wider border ${
+                          bridgeState === 'SAFE_OPEN' ? 'bg-emerald-950 text-emerald-300 border-emerald-700' :
+                          bridgeState === 'CLOSING' ? 'bg-rose-950 text-rose-300 border-rose-600 animate-pulse' :
+                          bridgeState === 'CLOSED' || bridgeState === 'TRAIN_PASSING' ? 'bg-red-950 text-red-200 border-red-500' :
+                          'bg-amber-950 text-amber-300 border-amber-700'
+                        }`}>
+                          {bridgeState}
+                        </span>
+                      </div>
+
+                      {/* Progress Bar */}
+                      <div className="my-4">
+                        <div className="flex justify-between text-xs font-semibold mb-1.5">
+                          <span className="text-slate-400">Extension Position:</span>
+                          <span className="font-mono font-bold text-slate-200">{positionPct}% ({positionPct === 100 ? 'Fully Deployed' : positionPct === 0 ? 'Fully Retracted' : 'In Transit'})</span>
+                        </div>
+                        <div className="w-full bg-slate-800 rounded-full h-3.5 overflow-hidden p-0.5 border border-slate-700">
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${
+                              positionPct === 100 ? 'bg-emerald-500' : positionPct === 0 ? 'bg-red-500' : 'bg-amber-400'
+                            }`}
+                            style={{ width: `${positionPct}%` }}
+                          ></div>
+                        </div>
+                        <div className="flex justify-between text-[10px] text-slate-400 mt-1 font-mono">
+                          <span>Platform 1 (0% Stowed)</span>
+                          <span>Platform 2 (100% Deployed)</span>
+                        </div>
+                      </div>
+
+                      {/* Metric Grid */}
+                      <div className="grid grid-cols-2 gap-3 text-xs mb-4">
+                        <div className="p-2.5 rounded-lg bg-slate-800/80 border border-slate-700">
+                          <span className="text-slate-400 block text-[10px] uppercase font-bold">Motor Drive</span>
+                          <span className="font-bold text-slate-200">{motorStatus}</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-slate-800/80 border border-slate-700">
+                          <span className="text-slate-400 block text-[10px] uppercase font-bold">Crossing Signal</span>
+                          <span className={`font-bold ${crossingActive ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {crossingActive ? '🟢 WALK OPEN' : '🔴 GATES CLOSED'}
+                          </span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-slate-800/80 border border-slate-700">
+                          <span className="text-slate-400 block text-[10px] uppercase font-bold">ESP32 IoT Status</span>
+                          <span className="font-bold text-emerald-400">ONLINE (14ms RTT)</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-slate-800/80 border border-slate-700">
+                          <span className="text-slate-400 block text-[10px] uppercase font-bold">Limit Switches</span>
+                          <span className="font-mono text-slate-300 text-[11px]">
+                            LS1: {positionPct === 0 ? 'ENGAGED' : 'OFF'} • LS2: {positionPct === 100 ? 'ENGAGED' : 'OFF'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-slate-800 text-[11px] text-slate-400 flex justify-between">
+                      <span>Last Event: <strong>{logs[0]?.type || 'STARTUP'}</strong></span>
+                      <span className="text-blue-400 font-mono">SIL-2 Interlock Logic Active</span>
+                    </div>
+                  </div>
+
+                  {/* Digital Twin Schematic */}
+                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                      <div>
+                        <h3 className="text-base font-bold text-slate-100">Physical Digital Twin — Bridge Mechanism</h3>
+                        <p className="text-xs text-slate-400">Animated station cross-section with moving span</p>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${crossingActive ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' : 'bg-red-950 text-red-300 border border-red-700 animate-pulse'}`}>
+                        {crossingActive ? 'CROSSING OPEN' : 'CROSSING STOPPED'}
+                      </span>
+                    </div>
+
+                    {/* Canvas Schematic */}
+                    <div className="relative w-full h-64 bg-slate-950 rounded-lg border border-slate-800 overflow-hidden my-4 flex items-center justify-center">
+                      <div className="absolute top-4 left-0 right-0 h-0.5 bg-yellow-500/30 border-t border-dashed border-yellow-400/60"></div>
+                      <div className="absolute top-3 left-1/4 text-[9px] text-yellow-500/70 font-mono">25kV AC OHE CATENARY</div>
+
+                      {/* Platform 1 Left */}
+                      <div className="absolute left-0 top-0 bottom-0 w-28 bg-slate-800 border-r-4 border-amber-500 z-10 flex flex-col justify-between p-3">
+                        <div>
+                          <div className="text-[11px] font-extrabold text-amber-400 uppercase">PLATFORM 1</div>
+                          <div className="text-[10px] text-slate-400">Main Building Side</div>
+                        </div>
+                        <div className="p-1.5 rounded bg-slate-900 border border-slate-700 text-center">
+                          <div className="text-[9px] font-bold text-blue-400">ACTUATOR BAY</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className={`w-3.5 h-3.5 rounded-full ${crossingActive ? 'bg-emerald-500' : 'bg-red-500 animate-pulse'}`}></div>
+                          <span className="text-[10px] font-bold">{crossingActive ? 'WALK' : 'WAIT'}</span>
+                        </div>
+                      </div>
+
+                      {/* Platform 2 Right */}
+                      <div className="absolute right-0 top-0 bottom-0 w-28 bg-slate-800 border-l-4 border-amber-500 z-10 flex flex-col justify-between p-3 text-right">
+                        <div>
+                          <div className="text-[11px] font-extrabold text-amber-400 uppercase">PLATFORM 2</div>
+                          <div className="text-[10px] text-slate-400">Island Platform</div>
+                        </div>
+                        <div className="p-1.5 rounded bg-slate-900 border border-slate-700 text-center">
+                          <div className="text-[9px] font-bold text-emerald-400">DOCKING LATCH</div>
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
+                          <span className="text-[10px] font-bold">{crossingActive ? 'WALK' : 'WAIT'}</span>
+                          <div className={`w-3.5 h-3.5 rounded-full ${crossingActive ? 'bg-emerald-500' : 'bg-red-500 animate-pulse'}`}></div>
+                        </div>
+                      </div>
+
+                      {/* Central Tracks */}
+                      <div className="absolute left-28 right-28 top-0 bottom-0 bg-stone-900 flex justify-around px-8 items-center">
+                        <div className="relative w-12 h-full flex flex-col justify-around py-1">
+                          {[...Array(10)].map((_, i) => <div key={i} className="w-full h-1 bg-stone-700"></div>)}
+                          <div className="absolute top-0 bottom-0 left-2 w-1 bg-slate-400"></div>
+                          <div className="absolute top-0 bottom-0 right-2 w-1 bg-slate-400"></div>
+                          <span className="absolute bottom-2 left-0 right-0 text-[8px] text-center font-mono text-slate-400">TRACK 1</span>
+                        </div>
+                        <div className="relative w-12 h-full flex flex-col justify-around py-1">
+                          {[...Array(10)].map((_, i) => <div key={i} className="w-full h-1 bg-stone-700"></div>)}
+                          <div className="absolute top-0 bottom-0 left-2 w-1 bg-slate-400"></div>
+                          <div className="absolute top-0 bottom-0 right-2 w-1 bg-slate-400"></div>
+                          <span className="absolute bottom-2 left-0 right-0 text-[8px] text-center font-mono text-slate-400">TRACK 2</span>
+                        </div>
+
+                        {/* Train Passing Visual */}
+                        {trainDistance <= 2.0 && trainDistance >= -0.8 && (
+                          <div className="absolute w-14 py-2 rounded-lg bg-blue-700 border-2 border-amber-400 shadow-2xl z-15 flex flex-col items-center justify-center animate-bounce" style={{ left: '55%' }}>
+                            <span className="text-[8px] font-black text-white">12711</span>
+                            <span className="text-[7px] text-amber-300 font-bold">PINAKINI</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Moving Retractable Bridge Span */}
+                      <div
+                        className="absolute h-12 bg-gradient-to-r from-blue-900 via-indigo-800 to-blue-900 border-y-2 border-blue-400 z-20 transition-all duration-300 rounded shadow-2xl flex items-center justify-center text-[10px] font-black tracking-wider text-blue-100"
+                        style={{
+                          left: '112px',
+                          width: `${((window.innerWidth > 640 ? 300 : 180) * positionPct) / 100}px`,
+                          maxWidth: 'calc(100% - 224px)'
+                        }}
+                      >
+                        {positionPct === 100 ? 'FOOTBRIDGE EXTENDED' : positionPct === 0 ? 'RETRACTED' : `RETRACTING ${positionPct}%`}
+                      </div>
+                    </div>
+
+                    <div className="flex justify-between text-[11px] text-slate-400 pt-2 border-t border-slate-800">
+                      <span>Limit LS1: Retracted Bay</span>
+                      <span>Limit LS2: Island Dock</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Approaching Trains Table */}
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg">
+                  <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+                    <div>
+                      <h3 className="text-base font-bold text-slate-100">Approaching Corridor Trains</h3>
+                      <p className="text-xs text-slate-400">Live GPS tracking on Vijayawada - Chennai Main Line</p>
+                    </div>
+                    <span className="text-xs text-slate-400">Corridor Speed Limit: <strong className="text-blue-400">130 km/h</strong></span>
+                  </div>
+
+                  <div className="overflow-x-auto mt-3">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-800 text-slate-400 uppercase text-[10px] tracking-wider">
+                          <th className="pb-3 pl-2">Train</th>
+                          <th className="pb-3">Type</th>
+                          <th className="pb-3">Route</th>
+                          <th className="pb-3">Distance</th>
+                          <th className="pb-3">Speed</th>
+                          <th className="pb-3">ETA (OGL)</th>
+                          <th className="pb-3">Status</th>
+                          <th className="pb-3 text-right pr-2">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60">
+                        {INITIAL_TRAINS.map(t => {
+                          const dist = t.train_number === '12711' ? trainDistance : t.dist;
+                          const isThreat = dist <= 5.0 && dist > 0;
+                          return (
+                            <tr key={t.train_number} className={`hover:bg-slate-800/40 transition ${isThreat ? 'bg-red-950/20' : ''}`}>
+                              <td className="py-3 pl-2 font-bold text-slate-100">
+                                <span className="font-mono text-blue-400 mr-1.5">{t.train_number}</span>
+                                {t.train_name}
+                              </td>
+                              <td className="py-3 text-slate-300">{t.train_type}</td>
+                              <td className="py-3 text-slate-300">{t.origin.split(' ')[0]} ➔ {t.dest.split(' ')[0]}</td>
+                              <td className={`py-3 font-mono font-extrabold ${isThreat ? 'text-red-400' : 'text-slate-200'}`}>
+                                {dist.toFixed(1)} km
+                              </td>
+                              <td className="py-3 font-mono text-slate-300">{t.speed} km/h</td>
+                              <td className="py-3 font-mono text-emerald-400 font-bold">{t.eta}</td>
+                              <td className="py-3">
+                                {isThreat ? (
+                                  <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-red-950 text-red-300 border border-red-700 animate-pulse">
+                                    ⚠️ CLOSURE TRIGGERED
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-300 border border-slate-700">
+                                    MONITORING
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 text-right pr-2">
+                                <button
+                                  onClick={() => { setSelectedTrain(t); setActiveTab('details'); }}
+                                  className="px-3 py-1 rounded-md text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white shadow transition"
+                                >
+                                  Track Live
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Leaflet Rail Map */}
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-3 border-b border-slate-800 gap-2">
+                    <div>
+                      <h3 className="text-base font-bold text-slate-100">Live Spatial Track & Safety Radius Map</h3>
+                      <p className="text-xs text-slate-400">Centered at Ongole Station Footbridge (15.5034° N, 80.0505° E)</p>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs">
+                      <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span> 2km Local Zone</span>
+                      <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500"></span> 5km Express Zone</span>
+                      <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Live Train Marker</span>
+                    </div>
+                  </div>
+                  <div ref={mapContainerRef} className="w-full h-80 sm:h-96 rounded-lg my-4 border border-slate-800"></div>
+                </div>
+              </>
+            )}
+
+            {/* TAB: TRAIN SEARCH */}
+            {activeTab === 'search' && (
+              <div className="space-y-6">
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg">
+                  <h2 className="text-base font-bold text-slate-100 mb-2">Live Train Search & Schedule</h2>
+                  <input
+                    type="text"
+                    placeholder="Search by Train Number (12711), Name (Pinakini), Origin, or Destination..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full px-4 py-3 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 placeholder-slate-400 text-sm focus:outline-none focus:border-blue-500"
+                  />
+                  <div className="flex gap-2 mt-3 text-xs text-slate-400">
+                    <span>Quick:</span>
+                    {['Pinakini', 'Vande Bharat', 'Tirupati', '12711'].map(q => (
+                      <button key={q} onClick={() => setSearchQuery(q)} className="px-2.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700">
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {INITIAL_TRAINS.filter(t => t.train_name.toLowerCase().includes(searchQuery.toLowerCase()) || t.train_number.includes(searchQuery) || t.origin.toLowerCase().includes(searchQuery.toLowerCase())).map(t => (
+                    <div key={t.train_number} className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
+                      <div>
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <span className="font-mono text-base font-bold text-blue-400">{t.train_number}</span>
+                            <h3 className="font-bold text-sm text-slate-100">{t.train_name}</h3>
+                            <span className="text-xs text-slate-400">{t.origin} ➔ {t.dest}</span>
+                          </div>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                            {t.train_type}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 bg-slate-800/60 rounded-lg p-2.5 my-4 text-center text-xs">
+                          <div>
+                            <span className="text-[10px] uppercase text-slate-400 block font-semibold">Distance</span>
+                            <span className="font-bold text-slate-200 font-mono">{(t.train_number === '12711' ? trainDistance : t.dist).toFixed(1)} km</span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] uppercase text-slate-400 block font-semibold">Speed</span>
+                            <span className="font-bold text-slate-200 font-mono">{t.speed} km/h</span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] uppercase text-slate-400 block font-semibold">ETA OGL</span>
+                            <span className="font-bold text-emerald-400 font-mono">{t.eta}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => { setSelectedTrain(t); setActiveTab('details'); }}
+                        className="w-full py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white transition shadow"
+                      >
+                        Track Live Train
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* TAB: LIVE TRACKING (WHERE IS MY TRAIN) */}
+            {activeTab === 'details' && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => setActiveTab('dashboard')}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold"
+                  >
+                    ← Back to Dashboard
+                  </button>
+                  <span className="text-xs text-emerald-400 font-mono">Live GPS Telemetry Connected</span>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-4 border-b border-slate-800 gap-3">
+                    <div>
+                      <span className="font-mono text-lg font-bold text-blue-400 mr-2">{selectedTrain.train_number}</span>
+                      <h2 className="text-xl font-extrabold text-white inline">{selectedTrain.train_name}</h2>
+                      <p className="text-xs text-slate-400 mt-1">{selectedTrain.origin} ➔ {selectedTrain.dest} • {selectedTrain.platform}</p>
+                    </div>
+                    <span className="px-3 py-1 rounded-lg text-xs font-bold uppercase bg-amber-950 text-amber-300 border border-amber-700">
+                      SAFETY THRESHOLD: 5.0 KM
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 text-center">
+                    <div className="bg-slate-800/80 p-3 rounded-lg border border-slate-700">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Distance to OGL Bridge</span>
+                      <span className="text-xl font-black font-mono text-red-400">{trainDistance.toFixed(1)} km</span>
+                    </div>
+                    <div className="bg-slate-800/80 p-3 rounded-lg border border-slate-700">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Safety Zone</span>
+                      <span className="text-xl font-black font-mono text-amber-400">{trainDistance <= 5 ? 'CLOSURE REQUIRED' : 'SAFE'}</span>
+                    </div>
+                    <div className="bg-slate-800/80 p-3 rounded-lg border border-slate-700">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Speed</span>
+                      <span className="text-xl font-black font-mono text-blue-400">{selectedTrain.speed} km/h</span>
+                    </div>
+                    <div className="bg-slate-800/80 p-3 rounded-lg border border-slate-700">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block">ETA Ongole</span>
+                      <span className="text-xl font-black font-mono text-emerald-400">{selectedTrain.eta}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Vertical Timeline */}
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl">
+                  <h3 className="text-base font-bold text-slate-100 mb-6">Route Station Progress (Where Is My Train)</h3>
+                  <div className="relative pl-6 space-y-6 before:absolute before:left-9 before:top-3 before:bottom-3 before:w-1 before:bg-slate-800">
+                    {[
+                      { code: 'MAS', name: 'Chennai Central', dist: '0 km', sched: '14:10', done: true },
+                      { code: 'GDR', name: 'Gudur Jn', dist: '138 km', sched: '16:20', done: true },
+                      { code: 'NLR', name: 'Nellore', dist: '176 km', sched: '16:50', done: true },
+                      { code: 'SKM', name: 'Singarayakonda', dist: '255 km', sched: '17:50', done: true },
+                      { code: 'OGL', name: 'ONGOLE (BRIDGE TARGET)', dist: '292 km', sched: selectedTrain.eta, isTarget: true },
+                      { code: 'CLX', name: 'Chirala', dist: '342 km', sched: '19:00' },
+                      { code: 'BZA', name: 'Vijayawada Jn', dist: '431 km', sched: '20:45' }
+                    ].map((s, i) => (
+                      <div key={s.code} className="relative flex items-center gap-4">
+                        <div className={`w-7 h-7 rounded-full flex items-center justify-center font-bold text-xs border-2 z-10 ${
+                          s.isTarget ? 'bg-amber-500 border-white text-slate-950 scale-125' : s.done ? 'bg-blue-600 border-blue-400 text-white' : 'bg-slate-800 border-slate-700 text-slate-400'
+                        }`}>
+                          {s.done ? '✓' : i + 1}
+                        </div>
+                        <div className={`flex-1 p-3 rounded-xl border flex justify-between items-center ${
+                          s.isTarget ? 'bg-amber-950/40 border-amber-500' : 'bg-slate-800/40 border-slate-800'
+                        }`}>
+                          <div>
+                            <span className="font-mono text-xs font-bold text-blue-400 mr-2">{s.code}</span>
+                            <strong className={s.isTarget ? 'text-amber-300' : 'text-slate-200'}>{s.name}</strong>
+                            <div className="text-xs text-slate-400">{s.dist}</div>
+                          </div>
+                          <span className="font-mono text-xs font-bold text-slate-300">{s.sched}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB: BRIDGE CONTROL (STAFF ONLY) */}
+            {activeTab === 'control' && (
+              role === 'PASSENGER' ? (
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center max-w-xl mx-auto my-12 shadow-xl">
+                  <div className="w-16 h-16 rounded-full bg-amber-950 border border-amber-700 text-amber-400 flex items-center justify-center mx-auto mb-4 text-2xl">
+                    🔒
+                  </div>
+                  <h2 className="text-xl font-bold text-slate-100">Restricted Railway Staff Console</h2>
+                  <p className="text-xs text-slate-400 mt-2">
+                    Direct bridge control is restricted to Station Masters & authorized Railway Operators.
+                  </p>
+                  <button
+                    onClick={() => setRole('OPERATOR')}
+                    className="mt-6 px-5 py-2.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white shadow"
+                  >
+                    Switch to Railway Operator (Demo Auth)
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex justify-between items-center">
+                    <div>
+                      <h2 className="text-lg font-bold text-slate-100">Authorized Bridge Actuation Console</h2>
+                      <p className="text-xs text-slate-400">Authenticated Role: <strong className="text-amber-400">{role}</strong></p>
+                    </div>
+                    <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
+                      SAFETY INTERLOCK ARMED
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <button
+                      onClick={() => setConfirmModal({ isOpen: true, cmd: 'OPEN', text: 'Are you sure you want to manually extend the footbridge across to Platform 2?' })}
+                      className="p-5 rounded-xl border border-emerald-600 bg-emerald-950/40 hover:bg-emerald-900/60 text-left transition"
+                    >
+                      <h4 className="text-base font-bold text-emerald-400">OPEN / EXTEND BRIDGE</h4>
+                      <p className="text-xs text-emerald-400/80 mt-1">Deploy telescopic walkway to Platform 2. Interlock verifies train distance first.</p>
+                    </button>
+
+                    <button
+                      onClick={() => setConfirmModal({ isOpen: true, cmd: 'CLOSE', text: 'Are you sure you want to manually retract the footbridge to Platform 1?' })}
+                      className="p-5 rounded-xl border border-amber-600 bg-amber-950/40 hover:bg-amber-900/60 text-left transition"
+                    >
+                      <h4 className="text-base font-bold text-amber-400">CLOSE / RETRACT BRIDGE</h4>
+                      <p className="text-xs text-amber-400/80 mt-1">Retract footbridge completely onto Platform 1 bay. Stops pedestrian crossing.</p>
+                    </button>
+
+                    <button
+                      onClick={() => executeManualCmd('STOP')}
+                      className="p-5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-750 text-left transition"
+                    >
+                      <h4 className="text-base font-bold text-slate-200">HOLD / PAUSE MOTION</h4>
+                      <p className="text-xs text-slate-400 mt-1">Instantly pauses actuator at current position.</p>
+                    </button>
+
+                    <button
+                      onClick={() => executeManualCmd('RESET_FAULT')}
+                      className="p-5 rounded-xl border border-blue-700 bg-blue-950/40 hover:bg-blue-900/60 text-left transition"
+                    >
+                      <h4 className="text-base font-bold text-blue-400">RESET FAULT / OVERRIDE</h4>
+                      <p className="text-xs text-blue-400/80 mt-1">Clear emergency latch after track inspection.</p>
+                    </button>
+                  </div>
+
+                  {/* EMERGENCY STOP */}
+                  <div className="bg-red-950/40 border-2 border-red-600 rounded-xl p-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <div>
+                      <h3 className="text-base font-black text-red-400">EMERGENCY HARDWARE STOP</h3>
+                      <p className="text-xs text-red-300/80 mt-1 max-w-md">Instantly cuts motor power and locks fail-safe solenoid brakes.</p>
+                    </div>
+                    <button
+                      onClick={() => executeManualCmd('EMERGENCY_STOP')}
+                      className="px-6 py-4 rounded-xl font-black text-sm uppercase bg-red-600 hover:bg-red-500 text-white shadow-2xl border-2 border-red-400 active:scale-95"
+                    >
+                      EMERGENCY STOP
+                    </button>
+                  </div>
+                </div>
+              )
+            )}
+
+            {/* TAB: EVENT LOGS */}
+            {activeTab === 'logs' && (
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+                <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-100">Safety Event Audit Trail & History</h2>
+                    <p className="text-xs text-slate-400">Sequential tamper-evident log of all transitions</p>
+                  </div>
+                  <button
+                    onClick={() => alert('Audit log exported to CSV!')}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold"
+                  >
+                    Export CSV
+                  </button>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400 uppercase text-[10px] tracking-wider">
+                        <th className="pb-2.5 pl-2">Time</th>
+                        <th className="pb-2.5">Severity</th>
+                        <th className="pb-2.5">Event</th>
+                        <th className="pb-2.5">Train</th>
+                        <th className="pb-2.5">Distance</th>
+                        <th className="pb-2.5">State</th>
+                        <th className="pb-2.5">Result</th>
+                        <th className="pb-2.5 pr-2">Details</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 font-sans">
+                      {logs.map(l => (
+                        <tr key={l.id} className="hover:bg-slate-800/40">
+                          <td className="py-3 pl-2 font-mono text-slate-400">{l.time}</td>
+                          <td className="py-3">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              l.sev === 'CRITICAL' ? 'bg-red-950 text-red-300 border border-red-800' :
+                              l.sev === 'WARNING' ? 'bg-amber-950 text-amber-300 border border-amber-800' :
+                              'bg-slate-800 text-slate-300'
+                            }`}>
+                              {l.sev}
+                            </span>
+                          </td>
+                          <td className="py-3 font-mono font-bold text-slate-200">{l.type}</td>
+                          <td className="py-3 text-blue-400 font-mono">{l.train}</td>
+                          <td className="py-3 font-mono text-slate-300">{l.dist}</td>
+                          <td className="py-3 font-mono text-slate-400">{l.state}</td>
+                          <td className="py-3 font-bold text-emerald-400">{l.res}</td>
+                          <td className="py-3 text-slate-300 max-w-sm truncate">{l.details}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* TAB: SYSTEM HEALTH */}
+            {activeTab === 'health' && (
+              <div className="space-y-6">
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex justify-between items-center">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-100">System Hardware Diagnostics & Watchdog</h2>
+                    <p className="text-xs text-slate-400">Continuous 1Hz health polling of all controllers and sensors</p>
+                  </div>
+                  <span className="px-3 py-1 rounded-lg text-xs font-bold uppercase bg-emerald-950 text-emerald-300 border border-emerald-800">
+                    ALL SYSTEMS HEALTHY
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {[
+                    { name: 'CRIS Train Location API', status: freshness === 'LIVE' ? 'ONLINE' : 'OFFLINE', latency: '42 ms', tag: 'NTES GPS' },
+                    { name: 'FastAPI Safety Engine', status: 'ONLINE', latency: '3 ms', tag: '10Hz Loop' },
+                    { name: 'ESP32 IoT Bridge Controller', status: esp32Status, latency: '14 ms', tag: '192.168.1.145' },
+                    { name: 'Linear Servo Actuators', status: esp32Status === 'ONLINE' ? 'ONLINE' : 'OFFLINE', latency: 'Current: 2.38A', tag: 'Dual Drive' },
+                    { name: 'Dual Axle Counter Radars', status: 'ONLINE', latency: '8 ms', tag: 'Track 1 & 2' },
+                    { name: 'Pedestrian Light Curtains', status: 'ONLINE', latency: '5 ms', tag: 'Infrared Barrier' },
+                    { name: 'WebSocket Realtime Hub', status: 'ONLINE', latency: '1 ms', tag: 'Active' },
+                    { name: 'SQLite Audit Store', status: 'ONLINE', latency: '2 ms', tag: 'Synchronized' }
+                  ].map(c => (
+                    <div key={c.name} className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg">
+                      <div className="flex justify-between items-center mb-2">
+                        <span className="text-[10px] text-blue-400 font-mono">{c.tag}</span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${c.status === 'ONLINE' ? 'bg-emerald-950 text-emerald-300' : 'bg-red-950 text-red-300 animate-pulse'}`}>
+                          {c.status}
+                        </span>
+                      </div>
+                      <h4 className="text-xs font-bold text-slate-100">{c.name}</h4>
+                      <div className="text-[11px] text-slate-400 mt-2 font-mono">{c.latency}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* API Key Connection Status Card */}
+                <div className="bg-slate-900 border border-blue-800/80 rounded-xl p-6 shadow-xl space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-800 pb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">🔑</span>
+                      <div>
+                        <h3 className="text-base font-bold text-slate-100">Live Train Location API Integration</h3>
+                        <p className="text-xs text-slate-400">CRIS / NTES Telemetry Gateway Authentication</p>
+                      </div>
+                    </div>
+                    <span className="px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider bg-emerald-950 text-emerald-300 border border-emerald-700 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                      API KEY CONNECTED & ACTIVE
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-1">
+                    <div className="p-3 rounded-lg bg-slate-800/80 border border-slate-700">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Configured API Key</span>
+                      <code className="font-mono font-bold text-blue-400 text-xs break-all select-all">
+                        {API_KEY}
+                      </code>
+                    </div>
+                    <div className="p-3 rounded-lg bg-slate-800/80 border border-slate-700">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Authorization Method</span>
+                      <span className="font-bold text-slate-200">Header: X-API-Key</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">TLS 1.3 Encrypted Handshake</span>
+                    </div>
+                    <div className="p-3 rounded-lg bg-slate-800/80 border border-slate-700">
+                      <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Endpoint Link</span>
+                      <span className="font-mono text-emerald-400 font-bold">http://localhost:3000/</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Proxy: http://localhost:8000/</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl space-y-4">
+                  <h3 className="text-base font-bold text-slate-100">Fail-Safe Behavioral Verification</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <button
+                      onClick={() => setEsp32Status(prev => prev === 'ONLINE' ? 'OFFLINE' : 'ONLINE')}
+                      className="p-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-left border border-slate-700 text-xs font-bold text-slate-200"
+                    >
+                      Toggle ESP32 Disconnect ({esp32Status === 'ONLINE' ? 'Simulate Failure' : 'Restore Link'})
+                    </button>
+                    <button
+                      onClick={() => setFreshness(prev => prev === 'LIVE' ? 'UNAVAILABLE' : 'LIVE')}
+                      className="p-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-left border border-slate-700 text-xs font-bold text-slate-200"
+                    >
+                      Toggle Train API Failure ({freshness === 'LIVE' ? 'Simulate Stale/Offline' : 'Restore Feed'})
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB: SIMULATION STUDIO */}
+            {activeTab === 'simulation' && (
+              <div className="space-y-6">
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex justify-between items-center">
+                  <div>
+                    <h2 className="text-lg font-bold text-slate-100">Developer Simulation & Safety Studio</h2>
+                    <p className="text-xs text-slate-400">Evaluate train approaches (10km ➔ 0km) and fail-safe safety triggers</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setTrainDistance(4.2);
+                      setIsSimPlaying(false);
+                      setBridgeState('CLOSING');
+                      setPositionPct(35);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold"
+                  >
+                    Reset Baseline
+                  </button>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl space-y-5">
+                  <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-100">Train Approach Distance Slider</h3>
+                      <p className="text-xs text-slate-400">Drag to test proximity thresholds</p>
+                    </div>
+                    <span className={`text-2xl font-black font-mono ${trainDistance <= 5 && trainDistance > 0 ? 'text-red-400' : 'text-blue-400'}`}>
+                      {trainDistance.toFixed(1)} km
+                    </span>
+                  </div>
+
+                  <input
+                    type="range"
+                    min="-1.5"
+                    max="10.0"
+                    step="0.1"
+                    value={trainDistance}
+                    onChange={(e) => {
+                      const d = parseFloat(e.target.value);
+                      setTrainDistance(d);
+                      evaluateDistance(d);
+                    }}
+                    className="w-full h-3 bg-slate-800 rounded-lg cursor-pointer accent-blue-500"
+                  />
+
+                  <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                    <span>10 km (Monitoring)</span>
+                    <span className="text-amber-400 font-bold">5 km (Express Trigger)</span>
+                    <span className="text-amber-400 font-bold">2 km (Local Trigger)</span>
+                    <span className="text-red-400 font-bold">0 km (OGL Bridge)</span>
+                    <span className="text-emerald-400 font-bold">+1.5 km (Passed Safe)</span>
+                  </div>
+
+                  <div className="flex justify-between items-center pt-3 border-t border-slate-800">
+                    <button
+                      onClick={() => setIsSimPlaying(!isSimPlaying)}
+                      className={`px-4 py-2 rounded-lg text-xs font-bold text-white shadow ${
+                        isSimPlaying ? 'bg-amber-600' : 'bg-emerald-600'
+                      }`}
+                    >
+                      {isSimPlaying ? '⏸️ Pause Auto-Run' : '▶️ Run Continuous Approach (88 km/h)'}
+                    </button>
+                    <span className="text-xs text-slate-300 font-mono">
+                      Current State: <strong className="text-white uppercase">{bridgeState}</strong>
+                    </span>
+                  </div>
+                </div>
+
+                {/* ESP32 Serial Console */}
+                <div className="bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
+                  <div className="bg-slate-900 px-4 py-2 border-b border-slate-800 text-xs font-bold text-slate-200 font-mono">
+                    ESP32 Serial Telemetry Console (/dev/ttyUSB0 • 115200 baud)
+                  </div>
+                  <div className="p-4 font-mono text-[11px] text-emerald-400 space-y-1 max-h-48 overflow-y-auto">
+                    <div>[ESP32_INIT] Controller initialized. Free Heap: 184 KB. WiFi: -58 dBm.</div>
+                    <div>[TELEMETRY] State: {bridgeState} | Pos: {positionPct}% | Motor: {motorStatus} | Limit LS1: {positionPct === 0 ? 'ON' : 'OFF'} | Limit LS2: {positionPct === 100 ? 'ON' : 'OFF'}</div>
+                    {isDanger && (
+                      <div className="text-amber-400 font-bold">[ACTUATOR] Proximity breach: Retracting bridge span to Platform 1 bay. Beacons active.</div>
+                    )}
+                    {bridgeState === 'CLOSED' && (
+                      <div className="text-red-400 font-bold">[INTERLOCK] LS1 engaged. Solenoid brake energized. Track safe.</div>
+                    )}
+                    {bridgeState === 'SAFE_OPEN' && (
+                      <div className="text-emerald-400 font-bold">[INTERLOCK] LS2 engaged. Bridge fully deployed. Green crossing lights ON.</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </main>
+
+          {/* MOBILE BOTTOM NAVIGATION */}
+          <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur border-t border-slate-800 px-2 py-1.5 flex justify-around items-center">
+            {[
+              { id: 'dashboard', label: 'Dash', icon: '📊' },
+              { id: 'search', label: 'Search', icon: '🔍' },
+              { id: 'details', label: 'Track', icon: '🚆' },
+              { id: 'control', label: 'Control', icon: '🎛️' },
+              { id: 'logs', label: 'Logs', icon: '📜' },
+              { id: 'simulation', label: 'Sim', icon: '🕹️' }
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex flex-col items-center py-1 px-2 rounded-lg text-[10px] ${
+                  activeTab === tab.id ? 'text-blue-400 font-bold' : 'text-slate-400'
+                }`}
+              >
+                <span className="text-base">{tab.icon}</span>
+                <span>{tab.label}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* CONFIRMATION MODAL */}
+          {confirmModal.isOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+                <h3 className="text-base font-bold text-slate-100">Confirm Bridge Command</h3>
+                <p className="text-xs text-slate-300">{confirmModal.text}</p>
+                <div className="flex justify-end gap-3 pt-2">
+                  <button
+                    onClick={() => setConfirmModal({ isOpen: false, cmd: null, text: '' })}
+                    className="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => executeManualCmd(confirmModal.cmd)}
+                    className="px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white shadow"
+                  >
+                    Confirm & Execute
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* DISCLAIMER MODAL */}
+          {isDisclaimerOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+              <div className="bg-slate-900 border-2 border-amber-500 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+                <div className="flex justify-between items-start border-b border-slate-800 pb-3">
+                  <div>
+                    <h2 className="text-lg font-bold text-white">Academic Prototype & Safety Notice</h2>
+                    <p className="text-xs text-amber-400 font-semibold">RAILSAFE Footbridge System Specification</p>
+                  </div>
+                  <button onClick={() => setIsDisclaimerOpen(false)} className="text-slate-400 hover:text-white text-xl">✕</button>
+                </div>
+
+                <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
+                  <p className="p-3 bg-amber-950/40 border border-amber-800 rounded-xl text-amber-200 font-semibold">
+                    This is an academic engineering prototype demonstration for Ongole Railway Station footbridge automation.
+                  </p>
+                  <p>
+                    <strong>SIL-4 / CENELEC Certification:</strong> Operational deployment requires fail-safe electronic interlocking certified by RDSO / Commissioner of Railway Safety (CRS).
+                  </p>
+                  <p>
+                    <strong>Hardware Redundancy:</strong> Real-world implementations require independent dual axle counters, optical doppler trackside radars, mechanical deadbolts, and fail-safe spring returns.
+                  </p>
+                  <p>
+                    <strong>Fail-Safe Invariant:</strong> Safety decisions are never made exclusively by frontend code. The backend safety engine and physical limit switches enforce final command veto.
+                  </p>
+                </div>
+
+                <div className="pt-3 border-t border-slate-800 flex justify-end">
+                  <button
+                    onClick={() => setIsDisclaimerOpen(false)}
+                    className="px-5 py-2.5 rounded-lg text-xs font-bold bg-blue-600 text-white shadow"
+                  >
+                    I Understand & Acknowledge
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
